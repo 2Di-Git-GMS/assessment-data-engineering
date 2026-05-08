@@ -1,0 +1,246 @@
+================================================================================
+TRANSFORMATIONAL AI - DATA ENGINEERING PROJECT
+Reflection / User Inputs
+================================================================================
+
+Project    : Amazon Reviews 2023 - Top Products for the ML Team
+Dataset    : McAuley-Lab/Amazon-Reviews-2023 (raw_review_All_Beauty
+             + raw_meta_All_Beauty), streamed from Hugging Face Hub
+Sample size: 100 reviews + 100 metadata items
+Tooling    : Python 3.14, pandas 3.x, pyarrow, datasets 2.20, seaborn, matplotlib
+
+Note on the dataset choice
+--------------------------
+The original course brief points at `amazon_us_reviews`. That dataset was
+removed by Amazon from the Hugging Face Hub in late 2023 and is no longer
+downloadable. The McAuley-Lab/Amazon-Reviews-2023 dataset is the modern,
+maintained replacement and exposes the same fields the rubric asks about
+(product title, average rating, price, parent_asin, etc.), so the project
+was completed against it.
+
+
+================================================================================
+PART 1 - PREPARING THE ENVIRONMENT
+================================================================================
+
+Q1. Why use a virtual environment / Jupyter Notebook for this project?
+A1. A virtual environment isolates the project's dependencies from the
+    system Python install, so installing `datasets==2.20` here does not
+    break a different project that needs `datasets==4.x`. Jupyter on top
+    of that gives me cell-by-cell execution: I can iterate on the cleaning
+    logic without re-downloading the 100 sample rows every time, and
+    keep code, outputs, and narrative side by side - which is exactly
+    how a real data-engineering write-up gets shared with stakeholders.
+
+Q2. Why install all libraries in one `pip install` call?
+A2. Pip resolves dependency versions across the *set* of packages it is
+    asked to install, so a single command is much more likely to land
+    on a mutually compatible version set than calling `pip install` once
+    per package. It is also faster (one resolver pass) and produces one
+    clean log to scan for "Successfully installed ...".
+
+
+================================================================================
+PART 2 - REVIEWS DATASET
+================================================================================
+
+Q3. Why limit the sample to 100 items during exploration?
+A3. The full reviews corpus is ~22.6 GB. At exploration time I am
+    answering questions like "what columns does this have?" and "is the
+    price field numeric?" - all of which can be answered from a tiny
+    sample. Capping the loop at 100 keeps the laptop responsive, keeps
+    network usage low, and makes every cell run in seconds. The same
+    code, with the cap removed, scales to the full dataset on bigger
+    hardware.
+
+Q4. What does `streaming=True` buy us, and why pair it with a `for`/`break` loop?
+A4. With `streaming=True`, `load_dataset` returns an `IterableDataset`
+    that yields rows lazily over the network instead of materialising the
+    full file on disk first. The `for idx, item in enumerate(...): if idx
+    >= sample_limit: break` pattern is the natural way to consume an
+    iterable up to a known cap - we read exactly N rows and then stop,
+    so we never pay for data we are not going to use.
+
+Q5. What does `.head()` tell you about the reviews data?
+A5. Each row is one customer review, keyed to a product through
+    `product_id` / `parent_asin`. Useful columns are `star_rating` (float
+    1-5), `review_title`, `review_body`, `helpful_vote`, and
+    `verified_purchase`. The reviews dataset does NOT carry a price or a
+    product title - that information lives in the metadata dataset, which
+    is why both are needed together.
+
+
+================================================================================
+PART 3 - METADATA DATASET
+================================================================================
+
+Q6. How does the metadata schema differ from the reviews schema?
+A6. Metadata is one row per product (not per review), and it adds the
+    fields the ML team actually wants to filter on: `product_title`,
+    `product_price`, `average_rating` (already aggregated), `categories`,
+    `store`, `features`, `description`, `images`. The shared key is
+    `parent_asin` - that is the column that lets the two DataFrames be
+    joined when we want both review text and product attributes in one
+    table.
+
+Q7. Why is exception handling important when looking up product prices?
+A7. Real catalog data is dirty. In our 100-sample slice, MOST of the
+    products had a missing price (the field came through as None or as
+    a non-numeric string). A naive `float(price)` would crash the
+    notebook on the first such row. Wrapping the lookup in `try/except`
+    plus using `pd.to_numeric(..., errors='coerce')` lets the pipeline
+    keep going - bad rows become NaN, get filtered out by the cleaning
+    step, and the user sees a clean error message instead of a stack
+    trace.
+
+
+================================================================================
+PART 4 - COMPARING THE TWO DATAFRAMES
+================================================================================
+
+Q8. What did `.columns`, `.dtypes`, and `.info()` each tell you, and which
+    one was most useful?
+A8. - `.columns` is the fastest "what fields exist?" check.
+    - `.dtypes` adds the type per column - this is how I caught that
+      `product_price` arrives as `object` (string) and needs coercion.
+    - `.info()` is the most useful single call. It bundles the row count,
+      every column's name + dtype + non-null count, and the memory
+      footprint into one summary. If I had to pick one method to ship to
+      a teammate at 5 PM on a Friday, it would be `.info()`.
+
+Q9. Why iterate the two DataFrames with a `for` loop and print
+    `list(df.columns)` instead of just printing each one inline?
+A9. The loop scales: if a third (or fourth) DataFrame joins later, the
+    same loop already prints it without code changes. It is also the
+    PCEP-style pattern the course is teaching - separating the "what
+    do I want to print" (a list) from the "how do I print it" (one loop
+    over the inputs).
+
+
+================================================================================
+PART 5 - CLEANING FOR THE ML TEAM
+================================================================================
+
+Q10. What three filters define a "top product" for this project?
+A10. The product must (1) have a non-null `product_title`, (2) have a
+     non-null numeric `product_price` (after `pd.to_numeric(...,
+     errors='coerce')`), and (3) have an `average_rating >= 4.5`. All
+     three conditions are AND-combined - a product missing any one of
+     them is dropped.
+
+Q11. How many of the 100 metadata rows survived the clean, and what does
+     that tell you about the data?
+A11. Five rows survived (5.00%). That is a striking signal: even on a
+     curated, modern dataset the majority of products are missing a
+     numeric price. In production this would mean either (a) backfilling
+     prices from another source, or (b) accepting that the ML team's
+     usable training pool is much smaller than the raw row count
+     suggests.
+
+Q12. Why save the cleaned dataset to BOTH .csv and .parquet?
+A12. CSV is universal - any teammate, any language, any spreadsheet can
+     open it, and it survives email and ticket attachments. Parquet is
+     columnar and compressed - it is ~6x smaller here (3.4 KB vs 559
+     bytes for this tiny sample, but the ratio grows with size) and is
+     dramatically faster to load for downstream ML tooling. Shipping
+     both means the data-science team and the BI / ops team are both
+     happy without anyone having to convert formats.
+
+Q13. Why guard `calculate_percentage` with `if whole == 0`?
+A13. To avoid `ZeroDivisionError`. If the upstream filter ever produces
+     an empty DataFrame (unfamiliar data, schema drift, Hugging Face
+     downtime) the percentage call would otherwise crash the whole
+     notebook. Returning 0 is a safe, explicit default.
+
+
+================================================================================
+PART 6 - VISUALIZATION
+================================================================================
+
+Q14. What does the price histogram (with KDE) tell you?
+A14. The five top products cluster heavily under $25, with one outlier
+     case-of-10 wholesale item at $136. The KDE makes the lower
+     concentration obvious even with a small sample - the smoothed
+     curve peaks where most products live, which is the kind of
+     "where is the meat of the distribution" answer a pricing PM
+     wants in one glance.
+
+Q15. What does the price-vs-rating scatterplot tell you?
+A15. There is no obvious "you have to pay more for a higher-rated
+     product" trend in this slice - 5.0-rated products span both the
+     cheapest ($11.99) and most expensive ($136.17) ends. That weak
+     correlation is itself a useful signal: at this slice size, price
+     is not a proxy for rating.
+
+Q16. Why combine the two charts in a subplot dashboard?
+A16. Distribution (histogram) and pairwise relationship (scatter) answer
+     different questions; presenting them side by side lets a stakeholder
+     read both in one glance instead of paging between figures, and
+     keeps the axes aligned so price is read consistently across both.
+
+Q17. Why tighten the cutoff to 4.7 and `.sort_values()` after?
+A17. 4.5 is a generous bar - in our slice 5 products clear it. Pushing
+     to 4.7 narrows to the products the ML team should actually
+     prioritise, and `.sort_values(['average_rating','product_price'],
+     ascending=[False, True])` puts the highest-rated, then the cheapest
+     products first - which mirrors how a buyer would actually rank
+     them.
+
+
+================================================================================
+WRAP-UP REFLECTION
+================================================================================
+
+Q18. Which Python / pandas method was most helpful and why?
+A18. `pandas.DataFrame.info()`. One call gives you row count, every
+     column's dtype, every column's non-null count, and memory usage.
+     In a data-engineering context where 90% of the work is "do I
+     understand what I just loaded?", `.info()` answers that faster
+     than any other single method. Honourable mention: `pd.to_numeric(
+     ..., errors='coerce')` for being a one-liner that turns dirty
+     string price columns into clean numeric columns without crashing.
+
+Q19. How would I explain this project in a job interview?
+A19. "I built a small ETL + analysis pipeline on the Amazon Reviews
+     2023 dataset. It streams a 22 GB Hugging Face dataset 100 rows at
+     a time, joins reviews against product metadata on parent_asin,
+     uses `pd.to_numeric(..., errors='coerce')` plus boolean indexing
+     to drop products with missing titles, missing prices, or sub-4.5
+     ratings, and exports the cleaned table to both CSV and Parquet
+     for downstream ML. I added simple seaborn dashboards (histogram +
+     scatter) on top, plus a 4.7-rating cutoff view for a tighter
+     short-list. The interesting finding was that ~95% of the catalog
+     was missing a numeric price, which would be the first data-quality
+     ticket I would file in production."
+
+Q20. How would I extend this in production / for portfolio polish?
+A20. - Remove the 100-sample cap and run the same pipeline against the
+       full split, with chunked writes to Parquet.
+     - Join reviews to metadata on `parent_asin` so I can also use the
+       review-level signals (helpful_vote, verified_purchase) instead
+       of just the pre-aggregated `average_rating`.
+     - Cluster products on (price, average_rating, rating_number) to
+       surface "premium-but-loved" segments versus "cheap-and-loved".
+     - Add a box plot of price by rating bucket and a heatmap of
+       category x rating to make the visual section more informative.
+     - Wire the export step to a date-partitioned S3 / GCS path so
+       the ML team can pick up "yesterday's top_products" automatically.
+
+Q21. Real-world business use case?
+A21. Pricing optimisation. A retailer can take the top_products table
+     ("titles + prices that consistently earn >= 4.5 stars") and use it
+     as the training set for a model that predicts the price band most
+     likely to keep ratings high - i.e. the cheapest price you can
+     charge without dragging review quality down. The same table also
+     feeds a recommendation cold-start list ("here are products that
+     reliably make customers happy") for new users with no purchase
+     history.
+
+================================================================================
+DELIVERABLES
+================================================================================
+- transformational_ai_project.ipynb  (executed, with cell outputs)
+- top_products.csv                    (5 rows, 3 columns)
+- top_products.parquet                (same 5 rows, columnar format)
+- user_inputs.txt                     (this file)
+================================================================================
